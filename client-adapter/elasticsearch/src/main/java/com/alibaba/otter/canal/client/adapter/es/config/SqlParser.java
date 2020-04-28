@@ -1,20 +1,9 @@
 package com.alibaba.otter.canal.client.adapter.es.config;
 
-import static com.alibaba.fastsql.sql.ast.expr.SQLBinaryOperator.BooleanAnd;
-import static com.alibaba.fastsql.sql.ast.expr.SQLBinaryOperator.Equality;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.stream.Collectors;
-
 import com.alibaba.fastsql.sql.SQLUtils;
 import com.alibaba.fastsql.sql.ast.SQLExpr;
 import com.alibaba.fastsql.sql.ast.expr.*;
-import com.alibaba.fastsql.sql.ast.statement.SQLExprTableSource;
-import com.alibaba.fastsql.sql.ast.statement.SQLJoinTableSource;
-import com.alibaba.fastsql.sql.ast.statement.SQLSelectStatement;
-import com.alibaba.fastsql.sql.ast.statement.SQLSubqueryTableSource;
-import com.alibaba.fastsql.sql.ast.statement.SQLTableSource;
+import com.alibaba.fastsql.sql.ast.statement.*;
 import com.alibaba.fastsql.sql.dialect.mysql.ast.statement.MySqlSelectQueryBlock;
 import com.alibaba.fastsql.sql.dialect.mysql.parser.MySqlStatementParser;
 import com.alibaba.fastsql.sql.parser.ParserException;
@@ -23,6 +12,17 @@ import com.alibaba.otter.canal.client.adapter.es.config.SchemaItem.ColumnItem;
 import com.alibaba.otter.canal.client.adapter.es.config.SchemaItem.FieldItem;
 import com.alibaba.otter.canal.client.adapter.es.config.SchemaItem.RelationFieldsPair;
 import com.alibaba.otter.canal.client.adapter.es.config.SchemaItem.TableItem;
+import com.alibaba.otter.canal.common.utils.CollectionUtils;
+import org.apache.commons.lang.StringUtils;
+import org.springframework.util.Assert;
+
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+import static com.alibaba.fastsql.sql.ast.expr.SQLBinaryOperator.BooleanAnd;
+import static com.alibaba.fastsql.sql.ast.expr.SQLBinaryOperator.Equality;
 
 /**
  * ES同步指定sql格式解析
@@ -31,6 +31,21 @@ import com.alibaba.otter.canal.client.adapter.es.config.SchemaItem.TableItem;
  * @version 1.0.0
  */
 public class SqlParser {
+
+    /**
+     * 正则表达式 - 获取子数据查询语句中对主数据查询字段的引用表达式列表
+     */
+    public static final String REGEX_CHILD_SQL_MAIN_TABLE_FIELD_REF_EXPRS = "(\\s+)((\"|')?(\\$\\{(\\S*?)\\})(\"|')?)(\\s+)";
+
+    /**
+     * 正则表达式 - 获取子数据查询语句中和主数据查询字段的关联条件信息
+     */
+    public static final String REGEX_CHILD_SQL_MAIN_TABLE_RELATION_FIELDS = "(\\s+)(\\S*?)(\\s+)=" + REGEX_CHILD_SQL_MAIN_TABLE_FIELD_REF_EXPRS;
+
+    /**
+     * 子数据查询语句中的逻辑主数据“表”名
+     */
+    public static final String CHILD_SQL_MAIN_TABLE_LOGIC_NAME = "$_main";
 
     /**
      * 解析sql
@@ -45,6 +60,7 @@ public class SqlParser {
             MySqlSelectQueryBlock sqlSelectQueryBlock = (MySqlSelectQueryBlock) statement.getSelect().getQuery();
 
             SchemaItem schemaItem = new SchemaItem();
+            schemaItem.setMySqlSelectQueryBlock(sqlSelectQueryBlock);
             schemaItem.setSql(SQLUtils.toMySqlString(sqlSelectQueryBlock));
             SQLTableSource sqlTableSource = sqlSelectQueryBlock.getFrom();
             List<TableItem> tableItems = new ArrayList<>();
@@ -61,8 +77,87 @@ public class SqlParser {
             }
             return schemaItem;
         } catch (Exception e) {
-            throw new ParserException();
+            throw new ParserException(e, sql);
         }
+    }
+
+
+    /**
+     * 解析子数据sql
+     *
+     * @param childSql 子数据sql
+     * @param mainSchemaItem 主数据sql视图对象
+     * @return 视图对象
+     */
+    public static SchemaItem parseChild(String childSql, SchemaItem mainSchemaItem) {
+        SchemaItem childSchemaItem = parse(childSql);
+        childSql = childSchemaItem.getSql();
+        Map<String, TableItem> aliasTableItems = childSchemaItem.getAliasTableItems();
+        if (aliasTableItems.size()>1) {
+            throw new UnsupportedOperationException("[Child sql] Only support one table!");
+        }
+
+        try {
+            TableItem mainSqlItem = new TableItem(childSchemaItem);
+            mainSqlItem.setAlias(CHILD_SQL_MAIN_TABLE_LOGIC_NAME);
+            mainSqlItem.setTableName(CHILD_SQL_MAIN_TABLE_LOGIC_NAME);
+            mainSqlItem.setSchema(mainSchemaItem.getMainTable().getSchema());
+
+            //主数据sql查询字段列表
+            Set<String> fieldNamesInMainSql = mainSchemaItem.getSelectFields().keySet();
+
+            //子sql和主sql的关联关系字段信息
+            List<RelationFieldsPair> relationFieldsPairs = new ArrayList<>();
+            //子sql引用的主数据字段列表
+            List<FieldItem> mainFieldRefList = new ArrayList<>();
+
+            Matcher matcher = Pattern.compile(REGEX_CHILD_SQL_MAIN_TABLE_RELATION_FIELDS).matcher(childSql + " ");
+            while (matcher.find()){
+                FieldItem childFieldPart = new FieldItem();
+                FieldItem mainFieldPart = new FieldItem();
+                RelationFieldsPair relationFieldsPair = new RelationFieldsPair(childFieldPart, mainFieldPart);
+
+                //子数据字段引用表达式，如：“r._id”
+                String childFieldExpr = matcher.group(2);
+                Assert.hasText(childFieldExpr, "[Child sql] child field expr parse error: " + matcher.group());
+                childFieldPart.setExpr(childFieldExpr);
+
+                //子数据字段名，如：“_id”
+                String childFieldName = childFieldExpr.contains(".") ? StringUtils.substringAfter(childFieldExpr, ".") : childFieldExpr;
+                Assert.hasText(childFieldName, "[Child sql] child field name parse error: " + matcher.group());
+                childFieldPart.setFieldName(childFieldName);
+
+                //对主数据查询字段的引用表达式，如：“${_id}”
+                String mainFieldExpr = matcher.group(5);
+                Assert.hasText(mainFieldExpr, "[Child sql] main field expr parse error: " + matcher.group());
+                mainFieldPart.setExpr(mainFieldExpr);
+
+                //主数据字段名，如：“_id”
+                String mainFieldName = matcher.group(8);
+                Assert.hasText(mainFieldName, "[Child sql] main field name parse error: " + matcher.group());
+                mainFieldPart.setFieldName(mainFieldName);
+
+                if (!CollectionUtils.exists(
+                        fieldNamesInMainSql,
+                        fieldName -> StringUtils.equalsIgnoreCase(mainFieldName, (String) fieldName))) {
+                    throw new ParserException("Child sql field is not in the main sql fields: " + mainFieldName);
+                }
+                mainFieldRefList.add(mainFieldPart);
+                relationFieldsPairs.add(relationFieldsPair);
+            }
+            if (CollectionUtils.isEmpty(relationFieldsPairs)) {
+                throw new ParserException("Child sql hasn't associated with main sql field");
+            }
+            mainSqlItem.setSubQueryFields(mainFieldRefList);
+            mainSqlItem.setRelationFields(relationFieldsPairs);
+
+            aliasTableItems.put(CHILD_SQL_MAIN_TABLE_LOGIC_NAME, mainSqlItem);
+            childSchemaItem.getTableItemAliases().put(CHILD_SQL_MAIN_TABLE_LOGIC_NAME, Collections.singletonList(mainSqlItem));
+
+        } catch (Exception e) {
+            throw new ParserException(e, childSql);
+        }
+        return childSchemaItem;
     }
 
     /**

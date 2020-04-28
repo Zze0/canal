@@ -1,13 +1,14 @@
 package com.alibaba.otter.canal.client.adapter.es.support;
 
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-
-import javax.sql.DataSource;
-
+import com.alibaba.fastjson.JSON;
+import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfig;
+import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfig.ESMapping;
+import com.alibaba.otter.canal.client.adapter.es.config.SchemaItem;
+import com.alibaba.otter.canal.client.adapter.es.config.SchemaItem.ColumnItem;
+import com.alibaba.otter.canal.client.adapter.es.config.SchemaItem.FieldItem;
+import com.alibaba.otter.canal.client.adapter.es.support.ESConnection.*;
+import com.alibaba.otter.canal.client.adapter.support.DatasourceConfig;
+import com.alibaba.otter.canal.client.adapter.support.Util;
 import org.apache.commons.lang.StringUtils;
 import org.elasticsearch.action.bulk.BulkItemResponse;
 import org.elasticsearch.action.bulk.BulkResponse;
@@ -20,14 +21,12 @@ import org.elasticsearch.search.SearchHit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfig;
-import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfig.ESMapping;
-import com.alibaba.otter.canal.client.adapter.es.config.SchemaItem;
-import com.alibaba.otter.canal.client.adapter.es.config.SchemaItem.ColumnItem;
-import com.alibaba.otter.canal.client.adapter.es.config.SchemaItem.FieldItem;
-import com.alibaba.otter.canal.client.adapter.es.support.ESConnection.*;
-import com.alibaba.otter.canal.client.adapter.support.DatasourceConfig;
-import com.alibaba.otter.canal.client.adapter.support.Util;
+import javax.sql.DataSource;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * ES 操作模板
@@ -59,6 +58,26 @@ public class ESTemplate {
     }
 
     /**
+     * 加入批
+     */
+    private void addToBulk(IESRequest esRequest, ESMapping mapping, Map<String, Object> esFieldData) {
+        getBulk().add(esRequest, mapping.getCommitBatchSize(), bytesSizeToAdd -> {
+            if (esBulkRequest.numberOfActions() <= 0) {
+                try {
+                    esBulkRequest.add(esRequest);
+                    commit();
+                } catch (Exception e) {
+                    logger.error("批次中单条数据已达上限, 尝试单独推送失败！" + JSON.toJSONString(esFieldData), e);
+                }
+            } else {
+                commit();
+                esBulkRequest.add(esRequest);
+            }
+            return false;
+        });
+    }
+
+    /**
      * 插入数据
      *
      * @param mapping     配置对象
@@ -75,7 +94,7 @@ public class ESTemplate {
                 if (StringUtils.isNotEmpty(parentVal)) {
                     updateRequest.setRouting(parentVal);
                 }
-                getBulk().add(updateRequest);
+                addToBulk(updateRequest, mapping, esFieldData);
             } else {
                 ESIndexRequest indexRequest = esConnection.new ESIndexRequest(mapping.get_index(),
                         mapping.get_type(),
@@ -83,7 +102,7 @@ public class ESTemplate {
                 if (StringUtils.isNotEmpty(parentVal)) {
                     indexRequest.setRouting(parentVal);
                 }
-                getBulk().add(indexRequest);
+                addToBulk(indexRequest, mapping, esFieldData);
             }
             commitBulk();
         } else {
@@ -95,7 +114,7 @@ public class ESTemplate {
                 ESUpdateRequest esUpdateRequest = this.esConnection.new ESUpdateRequest(mapping.get_index(),
                         mapping.get_type(),
                         hit.getId()).setDoc(esFieldData);
-                getBulk().add(esUpdateRequest);
+                addToBulk(esUpdateRequest, mapping, esFieldData);
                 commitBulk();
             }
         }
@@ -173,7 +192,7 @@ public class ESTemplate {
             ESDeleteRequest esDeleteRequest = this.esConnection.new ESDeleteRequest(mapping.get_index(),
                     mapping.get_type(),
                     pkVal.toString());
-            getBulk().add(esDeleteRequest);
+            addToBulk(esDeleteRequest, mapping, esFieldData);
             commitBulk();
         } else {
             ESSearchRequest esSearchRequest = this.esConnection.new ESSearchRequest(mapping.get_index(),
@@ -183,7 +202,7 @@ public class ESTemplate {
                 ESUpdateRequest esUpdateRequest = this.esConnection.new ESUpdateRequest(mapping.get_index(),
                         mapping.get_type(),
                         hit.getId()).setDoc(esFieldData);
-                getBulk().add(esUpdateRequest);
+                addToBulk(esUpdateRequest, mapping, esFieldData);
                 commitBulk();
             }
         }
@@ -195,21 +214,39 @@ public class ESTemplate {
      */
     public void commit() {
         if (getBulk().numberOfActions() > 0) {
-            BulkResponse response = getBulk().bulk();
-            if (response.hasFailures()) {
-                for (BulkItemResponse itemResponse : response.getItems()) {
-                    if (!itemResponse.isFailed()) {
-                        continue;
-                    }
+            try {
+                BulkResponse response = getBulk().bulk();
 
-                    if (itemResponse.getFailure().getStatus() == RestStatus.NOT_FOUND) {
-                        logger.error(itemResponse.getFailureMessage());
-                    } else {
-                        throw new RuntimeException("ES sync commit error" + itemResponse.getFailureMessage());
+                if (response.hasFailures()) {
+                    for (BulkItemResponse itemResponse : response.getItems()) {
+                        if (!itemResponse.isFailed()) {
+                            continue;
+                        }
+
+                        Exception cause = itemResponse.getFailure().getCause();
+                        if (itemResponse.getFailure().getStatus() == RestStatus.NOT_FOUND) {
+                            String errMsg = "Response status is not found(404): index [" + itemResponse.getIndex() + "], type [" + itemResponse.getType() + "], id [" + itemResponse.getId() + "] ......";
+                            /*
+                            if (null != cause) {
+                                logger.error(errMsg, cause);
+                            } else {
+                                logger.error(errMsg + " No cause!");
+                            }
+                            */
+                            logger.warn(errMsg);
+                        } else {
+                            String errMsg = "ES sync commit error : index [" + itemResponse.getIndex() + "], type [" + itemResponse.getType() + "], id [" + itemResponse.getId() + "] ......";
+                            if (null != cause) {
+                                throw new RuntimeException(errMsg, cause);
+                            } else {
+                                throw new RuntimeException(errMsg + " No cause!");
+                            }
+                        }
                     }
                 }
+            } finally {
+                resetBulkRequestBuilder();
             }
-            resetBulkRequestBuilder();
         }
     }
 
@@ -232,7 +269,7 @@ public class ESTemplate {
                 if (StringUtils.isNotEmpty(parentVal)) {
                     esUpdateRequest.setRouting(parentVal);
                 }
-                getBulk().add(esUpdateRequest);
+                addToBulk(esUpdateRequest, mapping, esFieldData);
             } else {
                 ESUpdateRequest esUpdateRequest = this.esConnection.new ESUpdateRequest(mapping.get_index(),
                         mapping.get_type(),
@@ -240,7 +277,7 @@ public class ESTemplate {
                 if (StringUtils.isNotEmpty(parentVal)) {
                     esUpdateRequest.setRouting(parentVal);
                 }
-                getBulk().add(esUpdateRequest);
+                addToBulk(esUpdateRequest, mapping, esFieldData);
             }
         } else {
             ESSearchRequest esSearchRequest = this.esConnection.new ESSearchRequest(mapping.get_index(),
@@ -250,7 +287,7 @@ public class ESTemplate {
                 ESUpdateRequest esUpdateRequest = this.esConnection.new ESUpdateRequest(mapping.get_index(),
                         mapping.get_type(),
                         hit.getId()).setDoc(esFieldData);
-                getBulk().add(esUpdateRequest);
+                addToBulk(esUpdateRequest, mapping, esFieldData);
             }
         }
     }
@@ -267,10 +304,18 @@ public class ESTemplate {
                 value = resultSet.getByte(columnName);
             }
         }
+        return convertEsObj(mapping, fieldName, esType, value);
+    }
 
+    private Object convertEsObj(ESMapping mapping, String fieldName, String esType, Object value) {
         // 如果是对象类型
         if (mapping.getObjFields().containsKey(fieldName)) {
-            return ESSyncUtil.convertToEsObj(value, mapping.getObjFields().get(fieldName));
+            ESSyncConfig.ObjField objField = mapping.getObjFields().get(fieldName);
+            String separator = objField.getSeparator();
+            ESSyncConfig.ObjFieldType type = objField.getType();
+            String expr = StringUtils.isNotEmpty(separator) ? type.name() + ":" + separator : type.name();
+
+            return ESSyncUtil.convertToEsObj(value, expr);
         } else {
             return ESSyncUtil.typeConvert(value, esType);
         }
@@ -351,11 +396,7 @@ public class ESTemplate {
         }
 
         // 如果是对象类型
-        if (mapping.getObjFields().containsKey(fieldName)) {
-            return ESSyncUtil.convertToEsObj(value, mapping.getObjFields().get(fieldName));
-        } else {
-            return ESSyncUtil.typeConvert(value, esType);
-        }
+        return convertEsObj(mapping, fieldName, esType, value);
     }
 
     /**
@@ -475,44 +516,72 @@ public class ESTemplate {
     /**
      * es 字段类型本地缓存
      */
-    private static ConcurrentMap<String, Map<String, String>> esFieldTypes = new ConcurrentHashMap<>();
+    private static ConcurrentMap<String, Map<String, Object>> esFieldTypes = new ConcurrentHashMap<>();
 
     /**
-     * 获取es mapping中的属性类型
+     * 获取es mapping中的字段类型
      *
      * @param mapping   mapping配置
-     * @param fieldName 属性名
+     * @param fieldName 字段名
      * @return 类型
      */
-    @SuppressWarnings("unchecked")
-    private String getEsType(ESMapping mapping, String fieldName) {
-        String key = mapping.get_index() + "-" + mapping.get_type();
-        Map<String, String> fieldType = esFieldTypes.get(key);
-        if (fieldType != null) {
-            return fieldType.get(fieldName);
-        } else {
-            MappingMetaData mappingMetaData = esConnection.getMapping(mapping.get_index(), mapping.get_type());
+    public String getEsType(ESMapping mapping, String fieldName) {
+		Object esType = getEsMapping(mapping).get(fieldName);
+		return esType instanceof Map ? "object" : Objects.toString(esType, null);
+	}
 
-            if (mappingMetaData == null) {
-                throw new IllegalArgumentException("Not found the mapping info of index: " + mapping.get_index());
-            }
+    /**
+     * 获取es mapping中的字段类型
+     *
+     * @param mapping   mapping配置
+     * @param fieldName 字段名
+	 * @param innerFieldName 子字段名
+     * @return 类型
+     */
+    public String getEsType(ESMapping mapping, String fieldName, String innerFieldName) {
+		Object esType = getEsMapping(mapping).get(fieldName);
+		if (esType instanceof Map) {
+			return Objects.toString(((Map) esType).get(innerFieldName), null);
+		}
+		return Objects.toString(esType, null);
+	}
 
-            fieldType = new LinkedHashMap<>();
+	/**
+	 * 获取es mapping信息
+	 * @param mapping es配置信息
+	 * @return
+	 */
+	@SuppressWarnings("unchecked")
+	private Map<String, Object> getEsMapping(ESMapping mapping) {
+		String key = mapping.get_index() + "-" + mapping.get_type();
+		Map<String, Object> fieldType = esFieldTypes.get(key);
+		if (fieldType == null) {
+			MappingMetaData mappingMetaData = esConnection.getMapping(mapping.get_index(), mapping.get_type());
 
-            Map<String, Object> sourceMap = mappingMetaData.getSourceAsMap();
-            Map<String, Object> esMapping = (Map<String, Object>) sourceMap.get("properties");
-            for (Map.Entry<String, Object> entry : esMapping.entrySet()) {
-                Map<String, Object> value = (Map<String, Object>) entry.getValue();
-                if (value.containsKey("properties")) {
-                    fieldType.put(entry.getKey(), "object");
-                } else {
-                    fieldType.put(entry.getKey(), (String) value.get("type"));
-                }
-            }
-            esFieldTypes.put(key, fieldType);
+			if (mappingMetaData == null) {
+				throw new IllegalArgumentException("Not found the mapping info of index: " + mapping.get_index());
+			}
 
-            return fieldType.get(fieldName);
-        }
-    }
+			fieldType = new LinkedHashMap<>();
+
+			Map<String, Object> sourceMap = mappingMetaData.getSourceAsMap();
+			Map<String, Object> esMapping = (Map<String, Object>) sourceMap.get("properties");
+			for (Map.Entry<String, Object> entry : esMapping.entrySet()) {
+				Map<String, Object> value = (Map<String, Object>) entry.getValue();
+				if (value.containsKey("properties")) {
+					Map<String, Object> innerFieldType = new LinkedHashMap<>();
+					((Map<String, Map<String, Object>>)value.get("properties"))
+							.forEach((propKey, propValue) -> innerFieldType.put(propKey, propValue.get("type")));
+
+					fieldType.put(entry.getKey(), innerFieldType);
+				} else {
+					fieldType.put(entry.getKey(), value.get("type"));
+				}
+			}
+			esFieldTypes.put(key, fieldType);
+
+		}
+		return fieldType;
+	}
 
 }

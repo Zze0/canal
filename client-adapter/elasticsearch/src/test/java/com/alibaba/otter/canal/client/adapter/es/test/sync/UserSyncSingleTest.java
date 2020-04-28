@@ -1,20 +1,15 @@
 package com.alibaba.otter.canal.client.adapter.es.test.sync;
 
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-
+import com.alibaba.otter.canal.client.adapter.es.ESAdapter;
+import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfig;
+import com.alibaba.otter.canal.client.adapter.support.Dml;
 import org.elasticsearch.action.get.GetResponse;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
 
-import com.alibaba.otter.canal.client.adapter.es.ESAdapter;
-import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfig;
-import com.alibaba.otter.canal.client.adapter.support.Dml;
+import java.util.*;
 
 @Ignore
 public class UserSyncSingleTest {
@@ -23,7 +18,7 @@ public class UserSyncSingleTest {
 
     @Before
     public void init() {
-        // AdapterConfigs.put("es", "mytest_user_single.yml");
+        // AdapterConfigs.put(ESAdapter.ADAPTER_NAME, "mytest_user_single.yml");
         esAdapter = Common.init();
     }
 

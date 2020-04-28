@@ -1,10 +1,5 @@
 package com.alibaba.otter.canal.client.adapter.es.support;
 
-import java.io.IOException;
-import java.net.InetAddress;
-import java.net.UnknownHostException;
-import java.util.Map;
-
 import org.apache.commons.lang.StringUtils;
 import org.apache.http.HttpHost;
 import org.apache.http.auth.AuthScope;
@@ -28,6 +23,7 @@ import org.elasticsearch.action.update.UpdateRequestBuilder;
 import org.elasticsearch.client.*;
 import org.elasticsearch.client.transport.TransportClient;
 import org.elasticsearch.cluster.metadata.MappingMetaData;
+import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.collect.ImmutableOpenMap;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.TransportAddress;
@@ -36,6 +32,12 @@ import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.transport.client.PreBuiltTransportClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.Map;
+import java.util.function.Function;
 
 /**
  * ES 连接器, Transport Rest 两种方式
@@ -152,7 +154,14 @@ public class ESConnection {
         return mappingMetaData;
     }
 
-    public class ESIndexRequest {
+    public interface IESRequest {
+
+        ESBulkRequest add(ESBulkRequest esBulkRequest);
+
+        boolean add(ESBulkRequest esBulkRequest, int commitBatchSize, Function<Integer, Boolean> execIfGtCommitBatchSize);
+    }
+
+    public class ESIndexRequest implements IESRequest {
 
         private IndexRequestBuilder indexRequestBuilder;
 
@@ -199,9 +208,31 @@ public class ESConnection {
         public void setIndexRequest(IndexRequest indexRequest) {
             this.indexRequest = indexRequest;
         }
+
+        @Override
+        public ESBulkRequest add(ESBulkRequest esBulkRequest) {
+            if (mode == ESClientMode.TRANSPORT) {
+                esBulkRequest.getBulkRequestBuilder().add(indexRequestBuilder);
+            } else {
+                esBulkRequest.getBulkRequest().add(indexRequest);
+            }
+            return esBulkRequest;
+        }
+
+        @Override
+        public boolean add(ESBulkRequest esBulkRequest, int commitBatchSize, Function<Integer, Boolean> execIfGtCommitBatchSize) {
+            BytesReference source = getIndexRequest().source();
+            int bytesSizeToAdd = (source != null ? source.length() : 0) + 50;
+
+            if (esBulkRequest.getBulkRequest().estimatedSizeInBytes() + bytesSizeToAdd > commitBatchSize) {
+                return execIfGtCommitBatchSize.apply(bytesSizeToAdd);
+            }
+            add(esBulkRequest);
+            return true;
+        }
     }
 
-    public class ESUpdateRequest {
+    public class ESUpdateRequest implements IESRequest {
 
         private UpdateRequestBuilder updateRequestBuilder;
 
@@ -257,9 +288,40 @@ public class ESConnection {
         public void setUpdateRequest(UpdateRequest updateRequest) {
             this.updateRequest = updateRequest;
         }
+
+        @Override
+        public ESBulkRequest add(ESBulkRequest esBulkRequest) {
+            if (mode == ESClientMode.TRANSPORT) {
+                esBulkRequest.getBulkRequestBuilder().add(updateRequestBuilder);
+            } else {
+                esBulkRequest.getBulkRequest().add(updateRequest);
+            }
+            return esBulkRequest;
+        }
+
+        @Override
+        public boolean add(ESBulkRequest esBulkRequest, int commitBatchSize, Function<Integer, Boolean> execIfGtCommitBatchSize) {
+            int bytesSizeToAdd = 0;
+            UpdateRequest updateRequest = getUpdateRequest();
+            if (updateRequest.doc() != null) {
+                bytesSizeToAdd += updateRequest.doc().source().length();
+            }
+            if (updateRequest.upsertRequest() != null) {
+                bytesSizeToAdd += updateRequest.upsertRequest().source().length();
+            }
+            if (updateRequest.script() != null) {
+                bytesSizeToAdd += updateRequest.script().getIdOrCode().length() * 2;
+            }
+
+            if (esBulkRequest.getBulkRequest().estimatedSizeInBytes() + bytesSizeToAdd > commitBatchSize) {
+                return execIfGtCommitBatchSize.apply(bytesSizeToAdd);
+            }
+            add(esBulkRequest);
+            return true;
+        }
     }
 
-    public class ESDeleteRequest {
+    public class ESDeleteRequest implements IESRequest {
 
         private DeleteRequestBuilder deleteRequestBuilder;
 
@@ -287,6 +349,27 @@ public class ESConnection {
 
         public void setDeleteRequest(DeleteRequest deleteRequest) {
             this.deleteRequest = deleteRequest;
+        }
+
+        @Override
+        public ESBulkRequest add(ESBulkRequest esBulkRequest) {
+            if (mode == ESClientMode.TRANSPORT) {
+                esBulkRequest.getBulkRequestBuilder().add(deleteRequestBuilder);
+            } else {
+                esBulkRequest.getBulkRequest().add(deleteRequest);
+            }
+            return esBulkRequest;
+        }
+
+        @Override
+        public boolean add(ESBulkRequest esBulkRequest, int commitBatchSize, Function<Integer, Boolean> execIfGtCommitBatchSize) {
+            int bytesSizeToAdd = 50;
+
+            if (esBulkRequest.getBulkRequest().estimatedSizeInBytes() + bytesSizeToAdd > commitBatchSize) {
+                return execIfGtCommitBatchSize.apply(bytesSizeToAdd);
+            }
+            add(esBulkRequest);
+            return true;
         }
     }
 
@@ -377,31 +460,12 @@ public class ESConnection {
             }
         }
 
-        public ESBulkRequest add(ESIndexRequest esIndexRequest) {
-            if (mode == ESClientMode.TRANSPORT) {
-                bulkRequestBuilder.add(esIndexRequest.indexRequestBuilder);
-            } else {
-                bulkRequest.add(esIndexRequest.indexRequest);
-            }
-            return this;
+        public ESBulkRequest add(IESRequest esRequest) {
+            return esRequest.add(this);
         }
 
-        public ESBulkRequest add(ESUpdateRequest esUpdateRequest) {
-            if (mode == ESClientMode.TRANSPORT) {
-                bulkRequestBuilder.add(esUpdateRequest.updateRequestBuilder);
-            } else {
-                bulkRequest.add(esUpdateRequest.updateRequest);
-            }
-            return this;
-        }
-
-        public ESBulkRequest add(ESDeleteRequest esDeleteRequest) {
-            if (mode == ESClientMode.TRANSPORT) {
-                bulkRequestBuilder.add(esDeleteRequest.deleteRequestBuilder);
-            } else {
-                bulkRequest.add(esDeleteRequest.deleteRequest);
-            }
-            return this;
+        public boolean add(IESRequest esRequest, int commitBatchSize, Function<Integer, Boolean> execIfGtCommitBatchSize) {
+            return esRequest.add(this, commitBatchSize, execIfGtCommitBatchSize);
         }
 
         public int numberOfActions() {

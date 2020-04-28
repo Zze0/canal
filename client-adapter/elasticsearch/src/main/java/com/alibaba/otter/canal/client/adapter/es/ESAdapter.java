@@ -1,18 +1,5 @@
 package com.alibaba.otter.canal.client.adapter.es;
 
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
-import javax.sql.DataSource;
-
-import org.apache.commons.lang.StringUtils;
-import org.elasticsearch.action.search.SearchResponse;
-
 import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.otter.canal.client.adapter.OuterAdapter;
 import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfig;
@@ -26,6 +13,15 @@ import com.alibaba.otter.canal.client.adapter.es.service.ESSyncService;
 import com.alibaba.otter.canal.client.adapter.es.support.ESConnection;
 import com.alibaba.otter.canal.client.adapter.es.support.ESTemplate;
 import com.alibaba.otter.canal.client.adapter.support.*;
+import org.apache.commons.collections.MapUtils;
+import org.apache.commons.lang.StringUtils;
+import org.elasticsearch.action.search.SearchResponse;
+
+import javax.sql.DataSource;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * ES外部适配器
@@ -33,8 +29,13 @@ import com.alibaba.otter.canal.client.adapter.support.*;
  * @author rewerma 2018-10-20
  * @version 1.0.0
  */
-@SPI("es")
+@SPI(ESAdapter.ADAPTER_NAME)
 public class ESAdapter implements OuterAdapter {
+
+    /**
+     * 适配器名称
+     */
+    public static final String ADAPTER_NAME = "es";
 
     private Map<String, ESSyncConfig>              esSyncConfig        = new ConcurrentHashMap<>(); // 文件名对应配置
     private Map<String, Map<String, ESSyncConfig>> dbTableEsSyncConfig = new ConcurrentHashMap<>(); // schema-table对应配置
@@ -81,42 +82,8 @@ public class ESAdapter implements OuterAdapter {
                 }
             });
 
-            for (Map.Entry<String, ESSyncConfig> entry : esSyncConfig.entrySet()) {
-                String configName = entry.getKey();
-                ESSyncConfig config = entry.getValue();
-                SchemaItem schemaItem = SqlParser.parse(config.getEsMapping().getSql());
-                config.getEsMapping().setSchemaItem(schemaItem);
-
-                DruidDataSource dataSource = DatasourceConfig.DATA_SOURCES.get(config.getDataSourceKey());
-                if (dataSource == null || dataSource.getUrl() == null) {
-                    throw new RuntimeException("No data source found: " + config.getDataSourceKey());
-                }
-                Pattern pattern = Pattern.compile(".*:(.*)://.*/(.*)\\?.*$");
-                Matcher matcher = pattern.matcher(dataSource.getUrl());
-                if (!matcher.find()) {
-                    throw new RuntimeException("Not found the schema of jdbc-url: " + config.getDataSourceKey());
-                }
-                String schema = matcher.group(2);
-
-                schemaItem.getAliasTableItems().values().forEach(tableItem -> {
-                    Map<String, ESSyncConfig> esSyncConfigMap;
-                    if (envProperties != null
-                        && !"tcp".equalsIgnoreCase(envProperties.getProperty("canal.conf.mode"))) {
-                        esSyncConfigMap = dbTableEsSyncConfig
-                            .computeIfAbsent(StringUtils.trimToEmpty(config.getDestination()) + "-"
-                                             + StringUtils.trimToEmpty(config.getGroupId()) + "_" + schema + "-"
-                                             + tableItem.getTableName(),
-                                k -> new ConcurrentHashMap<>());
-                    } else {
-                        esSyncConfigMap = dbTableEsSyncConfig
-                            .computeIfAbsent(StringUtils.trimToEmpty(config.getDestination()) + "_" + schema + "-"
-                                             + tableItem.getTableName(),
-                                k -> new ConcurrentHashMap<>());
-                    }
-
-                    esSyncConfigMap.put(configName, config);
-                });
-            }
+            //添加同步配置
+            esSyncConfig.forEach(this::addDbTableEsSyncConfig);
 
             Map<String, String> properties = configuration.getProperties();
 
@@ -138,6 +105,79 @@ public class ESAdapter implements OuterAdapter {
         }
     }
 
+    /**
+     * 添加同步配置
+     * @param configFileName es配置文件名
+     * @param config 配置信息
+     */
+    public void addDbTableEsSyncConfig(String configFileName, ESSyncConfig config) {
+        ESMapping esMapping = config.getEsMapping();
+
+        List<SchemaItem> schemaItemList = new ArrayList<>();
+
+        SchemaItem schemaItem = SqlParser.parse(esMapping.getSql());
+        esMapping.setSchemaItem(schemaItem);
+        schemaItemList.add(schemaItem);
+
+        //对象字段列表
+        Map<String, ESSyncConfig.ObjField> objFields = esMapping.getObjFields();
+        if (MapUtils.isNotEmpty(objFields)) {
+            objFields.values()
+                    .stream()
+                    .filter(objField -> StringUtils.isNotBlank(objField.getSql()))
+                    .forEach(objField -> {
+                        //解析子数据sql
+                        SchemaItem childSchemaItem = SqlParser.parseChild(objField.getSql(), schemaItem);
+                        objField.setSchemaItem(childSchemaItem);
+                        objField.setSql(childSchemaItem.getSql());
+                        schemaItemList.add(childSchemaItem);
+                    });
+        }
+
+        DruidDataSource dataSource = DatasourceConfig.DATA_SOURCES.get(config.getDataSourceKey());
+        if (dataSource == null || dataSource.getUrl() == null) {
+            throw new RuntimeException("No data source found: " + config.getDataSourceKey());
+        }
+        Pattern pattern = Pattern.compile(".*:(.*)://.*/(.*)\\?.*$");
+        Matcher matcher = pattern.matcher(dataSource.getUrl());
+        if (!matcher.find()) {
+            throw new RuntimeException("Not found the schema of jdbc-url: " + config.getDataSourceKey());
+        }
+        String schema = matcher.group(2);
+
+        schemaItemList.stream()
+                .map(SchemaItem::getAliasTableItems)
+                .map(Map::values)
+                .flatMap(Collection::stream)
+                .forEach(tableItem -> {
+                    String destination = config.getDestination();
+                    String groupId = config.getGroupId();
+                    String tableName = tableItem.getTableName();
+
+                    String key = getDbTableEsSyncConfigKey(destination, groupId, schema, tableName);
+
+                    dbTableEsSyncConfig
+                            .computeIfAbsent(key, k -> new ConcurrentHashMap<>())
+                            .put(configFileName, config);
+                });
+    }
+
+    /**
+     * 移除同步配置
+     * @param configFileName es配置文件名
+     */
+    public void delDbTableEsSyncConfig(String configFileName) {
+        if (MapUtils.isEmpty(dbTableEsSyncConfig)) {
+            return;
+        }
+
+        dbTableEsSyncConfig.values().forEach(configMap -> {
+            if (configMap != null) {
+                configMap.remove(configFileName);
+            }
+        });
+    }
+
     @Override
     public void sync(List<Dml> dmls) {
         if (dmls == null || dmls.isEmpty()) {
@@ -155,15 +195,12 @@ public class ESAdapter implements OuterAdapter {
     private void sync(Dml dml) {
         String database = dml.getDatabase();
         String table = dml.getTable();
-        Map<String, ESSyncConfig> configMap;
-        if (envProperties != null && !"tcp".equalsIgnoreCase(envProperties.getProperty("canal.conf.mode"))) {
-            configMap = dbTableEsSyncConfig
-                .get(StringUtils.trimToEmpty(dml.getDestination()) + "-" + StringUtils.trimToEmpty(dml.getGroupId())
-                     + "_" + database + "-" + table);
-        } else {
-            configMap = dbTableEsSyncConfig
-                .get(StringUtils.trimToEmpty(dml.getDestination()) + "_" + database + "-" + table);
-        }
+        String destination = dml.getDestination();
+        String groupId = dml.getGroupId();
+
+        String key = getDbTableEsSyncConfigKey(destination, groupId, database, table);
+
+        Map<String, ESSyncConfig> configMap = dbTableEsSyncConfig.get(key);
 
         if (configMap != null && !configMap.values().isEmpty()) {
             esSyncService.sync(configMap.values(), dml);
@@ -176,7 +213,7 @@ public class ESAdapter implements OuterAdapter {
         ESSyncConfig config = esSyncConfig.get(task);
         if (config != null) {
             DataSource dataSource = DatasourceConfig.DATA_SOURCES.get(config.getDataSourceKey());
-            ESEtlService esEtlService = new ESEtlService(esConnection, config);
+            ESEtlService esEtlService = new ESEtlService(esConnection, config, esSyncService);
             if (dataSource != null) {
                 return esEtlService.importData(params);
             } else {
@@ -190,7 +227,7 @@ public class ESAdapter implements OuterAdapter {
             for (ESSyncConfig configTmp : esSyncConfig.values()) {
                 // 取所有的destination为task的配置
                 if (configTmp.getDestination().equals(task)) {
-                    ESEtlService esEtlService = new ESEtlService(esConnection, configTmp);
+                    ESEtlService esEtlService = new ESEtlService(esConnection, configTmp, esSyncService);
                     EtlResult etlRes = esEtlService.importData(params);
                     if (!etlRes.getSucceeded()) {
                         resSuccess = false;
@@ -246,5 +283,20 @@ public class ESAdapter implements OuterAdapter {
             return config.getDestination();
         }
         return null;
+    }
+
+    /**
+     * 获取同步配置key
+     * @param destination 对应canal的实例或者MQ的topic
+     * @param groupId 对应mq的group id
+     * @param database 数据库或schema
+     * @param table 表名
+     * @return
+     */
+    private String getDbTableEsSyncConfigKey(String destination, String groupId, String database, String table) {
+        if (envProperties != null && !"tcp".equalsIgnoreCase(envProperties.getProperty("canal.conf.mode"))) {
+            return StringUtils.trimToEmpty(destination) + "-" + StringUtils.trimToEmpty(groupId) + "_" + database + "-" + table;
+        }
+        return StringUtils.trimToEmpty(destination) + "_" + database + "-" + table;
     }
 }

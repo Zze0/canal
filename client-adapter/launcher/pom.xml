@@ -20,6 +20,23 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+
+            <!-- spring-boot-dependencies中依赖了老版本的es，这里需要特定指定版本 -->
+            <dependency>
+                <groupId>org.elasticsearch</groupId>
+                <artifactId>elasticsearch</artifactId>
+                <version>${elasticsearch.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.elasticsearch.client</groupId>
+                <artifactId>transport</artifactId>
+                <version>${elasticsearch.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.elasticsearch.plugin</groupId>
+                <artifactId>transport-netty4-client</artifactId>
+                <version>${elasticsearch.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -145,6 +162,18 @@
             </exclusions>
             <classifier>jar-with-dependencies</classifier>
             <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.googlecode.log4jdbc</groupId>
+            <artifactId>log4jdbc</artifactId>
+            <version>1.2</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
     </dependencies>
 

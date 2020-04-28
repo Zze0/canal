@@ -1,21 +1,20 @@
 package com.alibaba.otter.canal.client.adapter.es.test;
 
-import java.util.Map;
-
+import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfig;
+import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfigLoader;
+import com.alibaba.otter.canal.client.adapter.support.DatasourceConfig;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
 
-import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfig;
-import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfigLoader;
-import com.alibaba.otter.canal.client.adapter.support.DatasourceConfig;
+import java.util.Map;
 @Ignore
 public class ConfigLoadTest {
 
     @Before
     public void before() {
-        // AdapterConfigs.put("es", "mytest_user.yml");
+        // AdapterConfigs.put(ESAdapter.ADAPTER_NAME, "mytest_user.yml");
         // 加载数据源连接池
         DatasourceConfig.DATA_SOURCES.put("defaultDS", TestConstant.dataSource);
     }

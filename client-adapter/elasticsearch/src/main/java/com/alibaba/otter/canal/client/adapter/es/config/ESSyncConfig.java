@@ -2,10 +2,7 @@ package com.alibaba.otter.canal.client.adapter.es.config;
 
 import com.alibaba.otter.canal.client.adapter.support.AdapterConfig;
 
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
  * ES 映射配置
@@ -92,12 +89,20 @@ public class ESSyncConfig implements AdapterConfig {
         private boolean                      upsert          = false;
         private String                       pk;
         private Map<String, RelationMapping> relations       = new LinkedHashMap<>();
-        private String                       sql;
-        // 对象字段, 例: objFields:
-        // - _labels: array:;
-        private Map<String, String>          objFields       = new LinkedHashMap<>();
+		/**
+		 * 主数据sql
+		 */
+		private String                       sql;
+		/**
+		 * 对象字段（key是对象字段名，value是对象字段配置）
+		 */
+        private Map<String, ObjField>        objFields       = new LinkedHashMap<>();
         private List<String>                 skips           = new ArrayList<>();
         private int                          commitBatch     = 1000;
+		/**
+		 * 批量提交大小（单位为字节）
+		 */
+		private int                          commitBatchSize = 1048576;
         private String                       etlCondition;
         private boolean                      syncByTimestamp = false;                // 是否按时间戳定时同步
         private Long                         syncInterval;                           // 同步时间间隔
@@ -144,11 +149,11 @@ public class ESSyncConfig implements AdapterConfig {
             this.pk = pk;
         }
 
-        public Map<String, String> getObjFields() {
+        public Map<String, ObjField> getObjFields() {
             return objFields;
         }
 
-        public void setObjFields(Map<String, String> objFields) {
+        public void setObjFields(Map<String, ObjField> objFields) {
             this.objFields = objFields;
         }
 
@@ -215,7 +220,15 @@ public class ESSyncConfig implements AdapterConfig {
         public void setSchemaItem(SchemaItem schemaItem) {
             this.schemaItem = schemaItem;
         }
-    }
+
+		public int getCommitBatchSize() {
+			return commitBatchSize;
+		}
+
+		public void setCommitBatchSize(int commitBatchSize) {
+			this.commitBatchSize = commitBatchSize;
+		}
+	}
 
     public static class RelationMapping {
 
@@ -238,4 +251,110 @@ public class ESSyncConfig implements AdapterConfig {
             this.parent = parent;
         }
     }
+
+	/**
+	 * 对象字段设置
+	 */
+	public static class ObjField {
+
+		/**
+		 * 类型
+		 */
+		private ObjFieldType type;
+
+		/**
+		 * 子数据查询语句（使用“${?}”来引用主数据sql表字段值），如：“select _id,_name from test t where t._pk='${_id}'”
+		 * @see ESMapping#sql
+		 */
+		private String sql;
+
+		/**
+		 * sql解析结果模型
+		 */
+		private SchemaItem schemaItem;
+
+		/**
+		 * 分隔符（当type为joining时有效）
+		 * @see ObjFieldType#joining
+		 */
+    	private String separator;
+
+		/**
+		 * 是否反向更新（true表示当子数据表有数据变动时，也会同步更新es）
+		 */
+		private boolean reverseUpdate = true;
+
+		public ObjFieldType getType() {
+			return type;
+		}
+
+		public void setType(ObjFieldType type) {
+			this.type = type;
+		}
+
+		public String getSql() {
+			return sql;
+		}
+
+		public void setSql(String sql) {
+			this.sql = sql;
+		}
+
+		public SchemaItem getSchemaItem() {
+			return schemaItem;
+		}
+
+		public void setSchemaItem(SchemaItem schemaItem) {
+			this.schemaItem = schemaItem;
+		}
+
+		public String getSeparator() {
+			return Objects.toString(separator, "");
+		}
+
+		public void setSeparator(String separator) {
+			this.separator = separator;
+		}
+
+		public boolean isReverseUpdate() {
+			return reverseUpdate;
+		}
+
+		public void setReverseUpdate(boolean reverseUpdate) {
+			this.reverseUpdate = reverseUpdate;
+		}
+	}
+
+	/**
+	 * 对象类型
+	 */
+    public enum ObjFieldType {
+
+		/**
+		 * 数组，如: ["1","2","3","4"]
+		 */
+		array,
+
+		/**
+		 * JSON对象，如: {"key":"value"}
+		 */
+		object,
+
+		/**
+		 * JSON对象数组，如: [{"key":"value"}]
+		 */
+		objectArray,
+
+		/**
+		 * 字符串拼接（搭配ObjField#separator分隔符使用），如: “1,2,3,4”
+		 * @see ObjField#separator
+		 */
+		joining,
+
+		/**
+		 * JSON对象扁平化，如: {"key":"value"} <p/>
+		 * 将该子sql的数据全部扁平化放入主数据列表中，而不作为某个对象字段存在。
+		 */
+		objectFlat,
+	}
 }

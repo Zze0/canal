@@ -1,17 +1,16 @@
 package com.alibaba.otter.canal.client.adapter.es.test.sync;
 
+import com.alibaba.otter.canal.client.adapter.es.ESAdapter;
+import com.alibaba.otter.canal.client.adapter.es.test.TestConstant;
+import com.alibaba.otter.canal.client.adapter.support.DatasourceConfig;
+import com.alibaba.otter.canal.client.adapter.support.OuterAdapterConfig;
+
+import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.HashMap;
 import java.util.Map;
-
-import javax.sql.DataSource;
-
-import com.alibaba.otter.canal.client.adapter.es.ESAdapter;
-import com.alibaba.otter.canal.client.adapter.es.test.TestConstant;
-import com.alibaba.otter.canal.client.adapter.support.DatasourceConfig;
-import com.alibaba.otter.canal.client.adapter.support.OuterAdapterConfig;
 
 public class Common {
 
@@ -19,7 +18,7 @@ public class Common {
         DatasourceConfig.DATA_SOURCES.put("defaultDS", TestConstant.dataSource);
 
         OuterAdapterConfig outerAdapterConfig = new OuterAdapterConfig();
-        outerAdapterConfig.setName("es");
+        outerAdapterConfig.setName(ESAdapter.ADAPTER_NAME);
         outerAdapterConfig.setHosts(TestConstant.esHosts);
         Map<String, String> properties = new HashMap<>();
         properties.put("cluster.name", TestConstant.clusterName);

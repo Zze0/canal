@@ -1,11 +1,12 @@
 package com.alibaba.otter.canal.client.adapter.es.config;
 
+import com.alibaba.fastsql.sql.dialect.mysql.ast.statement.MySqlSelectQueryBlock;
+import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfig.ESMapping;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-
-import com.alibaba.otter.canal.client.adapter.es.config.ESSyncConfig.ESMapping;
 
 /**
  * ES 映射配置视图
@@ -22,6 +23,8 @@ public class SchemaItem {
     private volatile Map<String, List<TableItem>> tableItemAliases;
     private volatile Map<String, List<FieldItem>> columnFields;
     private volatile Boolean                      allFieldsSimple;
+
+    private MySqlSelectQueryBlock                 mySqlSelectQueryBlock;
 
     public void init() {
         this.getTableItemAliases();
@@ -139,6 +142,14 @@ public class SchemaItem {
         } else {
             return getSelectFields().get(mapping.getPk());
         }
+    }
+
+    public MySqlSelectQueryBlock getMySqlSelectQueryBlock() {
+        return mySqlSelectQueryBlock;
+    }
+
+    public void setMySqlSelectQueryBlock(MySqlSelectQueryBlock mySqlSelectQueryBlock) {
+        this.mySqlSelectQueryBlock = mySqlSelectQueryBlock;
     }
 
     public static class TableItem {

@@ -1,14 +1,14 @@
 package com.alibaba.otter.canal.client.adapter.es.config;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Properties;
-
+import com.alibaba.otter.canal.client.adapter.config.YmlConfigBinder;
+import com.alibaba.otter.canal.client.adapter.es.ESAdapter;
+import com.alibaba.otter.canal.client.adapter.support.MappingConfigsLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.alibaba.otter.canal.client.adapter.config.YmlConfigBinder;
-import com.alibaba.otter.canal.client.adapter.support.MappingConfigsLoader;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Properties;
 
 /**
  * ES 配置装载器
@@ -25,7 +25,7 @@ public class ESSyncConfigLoader {
 
         Map<String, ESSyncConfig> esSyncConfig = new LinkedHashMap<>();
 
-        Map<String, String> configContentMap = MappingConfigsLoader.loadConfigs("es");
+        Map<String, String> configContentMap = MappingConfigsLoader.loadConfigs(ESAdapter.ADAPTER_NAME);
         configContentMap.forEach((fileName, content) -> {
             ESSyncConfig config = YmlConfigBinder.bindYmlToObj(null, content, ESSyncConfig.class, null, envProperties);
             if (config == null) {
